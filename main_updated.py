@@ -54,9 +54,34 @@ import umap
 # ----------------------------
 
 RO_MONTHS = {
-    "ianuarie": 1, "februarie": 2, "martie": 3, "aprilie": 4, "mai": 5,
-    "iunie": 6, "iulie": 7, "august": 8, "septembrie": 9, "octombrie": 10,
-    "noiembrie": 11, "decembrie": 12,
+    # full RO
+    "ianuarie": 1, "februarie": 2, "martie": 3, "aprilie": 4, "mai": 5, "iunie": 6,
+    "iulie": 7, "august": 8, "septembrie": 9, "octombrie": 10, "noiembrie": 11, "decembrie": 12,
+
+    # abrev RO (cu/fara punct)
+    "ian": 1, "ian.": 1, "feb": 2, "feb.": 2, "mart": 3, "mart.": 3, "apr": 4, "apr.": 4,
+    "iun": 6, "iun.": 6, "iul": 7, "iul.": 7, "aug": 8, "aug.": 8,
+    "sept": 9, "sept.": 9, "sep": 9, "sep.": 9,
+    "oct": 10, "oct.": 10, "nov": 11, "nov.": 11, "dec": 12, "dec.": 12,
+
+
+    # EN
+    "january": 1, "jan": 1, "jan.": 1,
+    "february": 2, "feb": 2, "feb.": 2,
+    "march": 3, "mar": 3, "mar.": 3,
+    "april": 4, "apr": 4, "apr.": 4,
+    "may": 5,
+    "june": 6, "jun": 6, "jun.": 6,
+    "july": 7, "jul": 7, "jul.": 7,
+    "august": 8, "aug": 8, "aug.": 8,
+    "september": 9, "sep": 9, "sep.": 9, "sept": 9, "sept.": 9,
+    "october": 10, "oct": 10, "oct.": 10,
+    "november": 11, "nov": 11, "nov.": 11,
+    "december": 12, "dec": 12, "dec.": 12,
+}
+
+RO_WEEKDAYS = {
+    "luni", "marți", "marti", "miercuri", "joi", "vineri", "sâmbătă", "sambata", "duminică", "duminica"
 }
 
 RO_STOPWORDS_MIN = {
@@ -67,7 +92,7 @@ RO_STOPWORDS_MIN = {
     "aceasta", "acesta", "aceste", "acest", "acelor", "acele", "acei",
     "aici", "acolo", "unde", "când", "cand",
 }
-
+_SUMMARIZER = None
 
 def normalize_ws(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "")).strip()
@@ -81,17 +106,73 @@ def build_doc_text(title: Optional[str], text: str) -> str:
     return t or x
 
 
-def try_parse_date_ro(date_raw: str) -> Optional[str]:
+
+
+def _cleanup_date_string(s: str) -> str:
     """
-    Best-effort parse Romanian-ish dates to ISO YYYY-MM-DD.
+    Normalizează stringul de dată:
+    - elimină paranteze (…)
+    - taie după 'actualizat ...' păstrând primul timestamp
+    - elimină ziua săptămânii de la început (ex: 'vineri, ...')
+    - elimină virgule (dar NU taie restul!)
+    - normalizează diacritice vechi ţ -> ț
     """
-    if not date_raw:
+    if not s:
+        return ""
+
+    s = normalize_ws(s)
+    s = s.replace("ţ", "ț")
+
+    # ignoră tot ce e în paranteze: (actualizat ...)
+    s = re.sub(r"\(.*?\)", " ", s)
+
+    # dacă apare "actualizat", păstrăm doar înainte (prima dată e "publicat")
+    s = re.split(r"\bactualizat\b", s, flags=re.IGNORECASE)[0]
+
+    # ziua săptămânii la început: "vineri, 8 mai 2015"
+    m = re.match(r"^\s*([A-Za-zăâîșț\.]+)\s*,\s*(.+)$", s, flags=re.IGNORECASE)
+    if m and m.group(1).lower() in RO_WEEKDAYS:
+        s = m.group(2)
+
+    # elimină virgule (nu split!)
+    s = s.replace(",", " ")
+
+    # normalizează spații
+    s = normalize_ws(s)
+    return s
+
+def try_parse_time(s: str) -> Optional[str]:
+    """
+    Returnează HH:MM dacă găsește timp valid.
+    Acceptă: 15:09, 5:09, 15:09:33 (păstrează HH:MM)
+    """
+    if not s:
+        return None
+    s = normalize_ws(s)
+    m = re.search(r"\b(\d{1,2}):(\d{2})(?::(\d{2}))?\b", s)
+    if not m:
+        return None
+    hh = int(m.group(1))
+    mm = int(m.group(2))
+    if 0 <= hh <= 23 and 0 <= mm <= 59:
+        return f"{hh:02d}:{mm:02d}"
+    return None
+
+def try_parse_date_only(s: str) -> Optional[str]:
+    """
+    Parsează doar data (fără timp) în ISO YYYY-MM-DD.
+    Suportă:
+      - dd.mm.yyyy / dd/mm/yyyy / dd-mm-yyyy
+      - dd <lună> yyyy (RO/EN, abrev cu punct)
+      - <lună> dd yyyy (RO/EN, cu/ fără virgulă)
+    """
+    if not s:
         return None
 
-    s = normalize_ws(date_raw)
-    s = s.split(",")[0].strip()
+    s = _cleanup_date_string(s)
 
-    m = re.match(r"^(\d{1,2})[./](\d{1,2})[./](\d{4})$", s)
+    # 1) numeric: dd.mm.yyyy / dd-mm-yyyy / dd/mm/yyyy
+    m = re.search(r"\b(\d{1,2})[./-](\d{1,2})[./-](\d{4})\b", s)
     if m:
         d, mo, y = map(int, m.groups())
         try:
@@ -99,12 +180,26 @@ def try_parse_date_ro(date_raw: str) -> Optional[str]:
         except ValueError:
             return None
 
-    m = re.match(r"^(\d{1,2})\s+([A-Za-zăâîșţț]+)\s+(\d{4})$", s, flags=re.IGNORECASE)
+    # 2) dd <month> yyyy (RO/EN)
+    m = re.search(r"\b(\d{1,2})\s+([A-Za-zăâîșț\.]+)\s+(\d{4})\b", s, flags=re.IGNORECASE)
     if m:
         d = int(m.group(1))
-        mon_txt = m.group(2).lower().replace("ţ", "ț")
+        mon = m.group(2).lower()
         y = int(m.group(3))
-        mo = RO_MONTHS.get(mon_txt)
+        mo = RO_MONTHS.get(mon)
+        if mo:
+            try:
+                return datetime(y, mo, d).date().isoformat()
+            except ValueError:
+                return None
+
+    # 3) <month> dd yyyy  (ex: "mai 10 2015", "June 3 2021")
+    m = re.search(r"\b([A-Za-zăâîșț\.]+)\s+(\d{1,2})\s+(\d{4})\b", s, flags=re.IGNORECASE)
+    if m:
+        mon = m.group(1).lower()
+        d = int(m.group(2))
+        y = int(m.group(3))
+        mo = RO_MONTHS.get(mon)
         if mo:
             try:
                 return datetime(y, mo, d).date().isoformat()
@@ -113,6 +208,26 @@ def try_parse_date_ro(date_raw: str) -> Optional[str]:
 
     return None
 
+
+
+
+def parse_date_time_ro(date_raw: str, time_raw: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Întoarce (date_iso, time_hhmm).
+    - Dacă timpul e în date_raw, îl extrage.
+    - Dacă timpul e doar în time_raw, îl parsează de acolo.
+    """
+    dr = date_raw or ""
+    tr = time_raw or ""
+
+    # întâi încearcă să extragă timp din date_raw (ex: "08.01.2020 15:09")
+    time_from_date = try_parse_time(dr)
+    date_iso = try_parse_date_only(dr)
+
+    # fallback: data poate fi curată în date_raw, timpul în time_raw
+    time_iso = time_from_date or try_parse_time(tr)
+
+    return date_iso, time_iso
 
 LABEL_PATTERNS = {
     "date_raw": re.compile(r"^\s*Data\s*:\s*(.*)\s*$", re.IGNORECASE),
@@ -228,7 +343,7 @@ class ProtestRecord:
 
     # Backward-compatible combined tags (JSON array string)
     tags: str = "[]"
-
+    summary: str = ""
     content_hash: str = ""
 
 
@@ -272,7 +387,8 @@ def parse_records_from_paragraphs(paragraphs: List[str], source_file: str) -> Li
             text_chunks = []
             return
 
-        date_iso = try_parse_date_ro(cur.get("date_raw") or "")
+        date_iso, time_iso = parse_date_time_ro(cur.get("date_raw") or "", cur.get("time_raw") or "")
+        cur["time_raw"] = time_iso or cur.get("time_raw")
         sig = normalize_ws(f"{cur.get('title') or ''}||{cur.get('link') or ''}||{text[:500]}")
         content_hash = hashlib.sha256(sig.encode("utf-8")).hexdigest()
 
@@ -292,6 +408,7 @@ def parse_records_from_paragraphs(paragraphs: List[str], source_file: str) -> Li
             tags_hdbscan="",
             tags_umap_hdbscan="",
             tags="[]",
+            summary = "",
             content_hash=content_hash,
         )
         records.append(rec)
@@ -602,6 +719,7 @@ CREATE TABLE IF NOT EXISTS protests (
     tags_hdbscan TEXT NOT NULL DEFAULT '',
     tags_umap_hdbscan TEXT NOT NULL DEFAULT '',
     tags TEXT NOT NULL DEFAULT '[]',
+    summary TEXT NOT NULL,
     content_hash TEXT NOT NULL
 );
 
@@ -612,8 +730,8 @@ CREATE INDEX IF NOT EXISTS idx_protests_author ON protests(author);
 
 INSERT_SQL = """
 INSERT INTO protests (
-    source_file, source_name, date_raw, date_iso, time_raw, author, link, title, text, tags_tfidf, tag_bert, tags_lda, tags_hdbscan, tags_umap_hdbscan, tags, content_hash
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    source_file, source_name, date_raw, date_iso, time_raw, author, link, title, text, tags_tfidf, tag_bert, tags_lda, tags_hdbscan, tags_umap_hdbscan, tags, summary, content_hash
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(content_hash) DO UPDATE SET
     source_file=excluded.source_file,
     source_name=excluded.source_name,
@@ -629,7 +747,8 @@ ON CONFLICT(content_hash) DO UPDATE SET
     tags_lda=excluded.tags_lda,
     tags_hdbscan=excluded.tags_hdbscan,
     tags_umap_hdbscan=excluded.tags_umap_hdbscan,
-    tags=excluded.tags;
+    tags=excluded.tags,
+    summary = excluded.summary;
 """
 
 
@@ -659,7 +778,7 @@ def write_sqlite(db_path: Path, records: List[ProtestRecord]) -> Tuple[int, int]
             [
                 (
                     r.source_file, r.source_name, r.date_raw, r.date_iso, r.time_raw,
-                    r.author, r.link, r.title, r.text, r.tags_tfidf, r.tag_bert, r.tags_lda, r.tags_hdbscan, r.tags_umap_hdbscan, r.tags, r.content_hash
+                    r.author, r.link, r.title, r.text, r.tags_tfidf, r.tag_bert, r.tags_lda, r.tags_hdbscan, r.tags_umap_hdbscan, r.tags, r.summary, r.content_hash
                 )
                 for r in records
             ],
@@ -894,6 +1013,61 @@ def tag_topics_embeddings_umap_hdbscan(
 
     return tags_per_doc, cluster_label_map
 
+
+def make_summarizer():
+    """
+    Loads a multilingual summarization model.
+    Falls back to None if transformers not available.
+    """
+    try:
+        from transformers import pipeline
+        import torch
+
+        device = 0 if torch.backends.mps.is_available() else -1
+
+        # Multilingual model that works reasonably for Romanian
+        summarizer = pipeline(
+            "summarization",
+            model="csebuetnlp/mT5_multilingual_XLSum",
+            tokenizer="csebuetnlp/mT5_multilingual_XLSum",
+            device=device
+        )
+        return summarizer
+    except Exception as e:
+        print("[WARN] Summarization disabled:", e)
+        return None
+
+def summarize_text(text: str, max_length: int = 120) -> str:
+    """
+    Returns a short summary of the text.
+    Safe fallback to first 2 sentences if model unavailable.
+    """
+    global _SUMMARIZER
+
+    if not text:
+        return ""
+
+    if _SUMMARIZER is None:
+        _SUMMARIZER = make_summarizer()
+
+    if _SUMMARIZER is None:
+        # fallback: first ~2 sentences
+        sentences = text.split(".")
+        return ".".join(sentences[:2]).strip()
+
+    try:
+        summary = _SUMMARIZER(
+            text,
+            max_length=max_length,
+            min_length=30,
+            do_sample=False,
+            truncation=True,
+        )
+        return summary[0]["summary_text"]
+    except Exception:
+        sentences = text.split(".")
+        return ".".join(sentences[:2]).strip()
+
 # ----------------------------
 # Main
 # ----------------------------
@@ -921,6 +1095,13 @@ def main():
     # ----------------------------
     if all_records:
         docs = [build_doc_text(r.title, r.text) for r in all_records]
+        summaries = [""] * len(docs)
+        try:
+            for i, d in enumerate(docs):
+                summaries[i] = summarize_text(d, max_length=120)
+        except Exception as e:
+            print(f"[WARN] Summarization disabled (fallback to empty): {e}")
+
         # (A) TF-IDF topic tag
         tfidf_tags_per_doc, topic_labels = tag_topics_tfidf_kmeans_safe(
             docs, n_topics=12, stopwords=RO_STOPWORDS_MIN
@@ -968,8 +1149,9 @@ def main():
             stopwords=RO_STOPWORDS_MIN,
         )
         # Store all 5 tags (separate columns + combined JSON for backward compatibility)
-        for rec, tfidf_tags, btag, lda_tags, hdb_tags, umap_hdb_tags in zip(
-                all_records, tfidf_tags_per_doc, bert_tags, lda_tags_per_doc, hdb_tags_per_doc, umap_hdb_tags_per_doc
+        for rec, tfidf_tags, btag, lda_tags, hdb_tags, umap_hdb_tags, summ in zip(
+                all_records, tfidf_tags_per_doc, bert_tags, lda_tags_per_doc, hdb_tags_per_doc, umap_hdb_tags_per_doc,
+                summaries
         ):
             # Per-method columns (human-friendly plain strings)
             rec.tags_tfidf = "; ".join(tfidf_tags) if tfidf_tags else ""
@@ -977,7 +1159,7 @@ def main():
             rec.tags_lda = "; ".join(lda_tags) if lda_tags else ""
             rec.tags_hdbscan = "; ".join(hdb_tags) if hdb_tags else ""
             rec.tags_umap_hdbscan = "; ".join(umap_hdb_tags) if umap_hdb_tags else ""
-
+            rec.summary = summ
             # Optional combined field (JSON array string)
             combined = []
             if rec.tags_tfidf:
